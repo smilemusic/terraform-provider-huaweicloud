@@ -8,7 +8,9 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 	"github.com/huaweicloud/golangsdk"
+	"github.com/huaweicloud/golangsdk/openstack/dcs/v1/availablezones"
 	"github.com/huaweicloud/golangsdk/openstack/dcs/v1/instances"
+	"github.com/huaweicloud/golangsdk/openstack/dcs/v1/products"
 )
 
 func resourceDcsInstanceV1() *schema.Resource {
@@ -38,7 +40,7 @@ func resourceDcsInstanceV1() *schema.Resource {
 			},
 			"engine_version": {
 				Type:     schema.TypeString,
-				Optional: true,
+				Required: true,
 				ForceNew: true,
 			},
 			"capacity": {
@@ -77,10 +79,18 @@ func resourceDcsInstanceV1() *schema.Resource {
 				Elem:     &schema.Schema{Type: schema.TypeString},
 				ForceNew: true,
 			},
+			"instance_type": {
+				Type:          schema.TypeString,
+				ConflictsWith: []string{"product_id"},
+				ForceNew:      true,
+				Optional:      true,
+			},
 			"product_id": {
-				Type:     schema.TypeString,
-				Required: true,
-				ForceNew: true,
+				Type:          schema.TypeString,
+				ConflictsWith: []string{"instance_type"},
+				ForceNew:      true,
+				Optional:      true,
+				Computed:      true,
 			},
 			"maintain_begin": {
 				Type:     schema.TypeString,
@@ -188,6 +198,65 @@ func getInstanceBackupPolicy(d *schema.ResourceData) *instances.InstanceBackupPo
 	return instanceBackupPolicy
 }
 
+func getDcsProductId(client *golangsdk.ServiceClient, instanceType string) (string, error) {
+	v, err := products.Get(client).Extract()
+	if err != nil {
+		return "", err
+	}
+	log.Printf("[DEBUG] Dcs get products : %+v", v)
+	var FilteredPd []products.Product
+	for _, pd := range v.Products {
+		if instanceType != "" && pd.SpecCode != instanceType {
+			continue
+		}
+		FilteredPd = append(FilteredPd, pd)
+	}
+
+	if len(FilteredPd) < 1 {
+		return "", fmt.Errorf("Your query returned no results. Please change your filters and try again.")
+	}
+
+	return FilteredPd[0].ProductID, nil
+}
+
+func getDcsAZIds(client *golangsdk.ServiceClient, names []interface{}, regionId string) ([]string, error) {
+	v, err := availablezones.Get(client).Extract()
+	if err != nil {
+		return []string{}, err
+	}
+
+	log.Printf("[DEBUG] Dcs az : %+v", v)
+	var filteredAZIds = []string{}
+	if len(names) < 1 {
+		return []string{}, fmt.Errorf("Input available zones name is empty")
+	}
+	if v.RegionID == regionId {
+		nameMap := map[string]bool{}
+		for _, v := range names {
+			nameMap[v.(string)] = true
+		}
+
+		AZs := v.AvailableZones
+		for _, newAZ := range AZs {
+			if newAZ.ResourceAvailability != "true" {
+				continue
+			}
+
+			if _, ok := nameMap[newAZ.Code]; ok {
+				delete(nameMap, newAZ.Code)
+				filteredAZIds = append(filteredAZIds, newAZ.ID)
+			}
+
+		}
+	}
+
+	if len(filteredAZIds) < 1 {
+		return []string{}, fmt.Errorf("Not found any available zones")
+	}
+
+	return filteredAZIds, nil
+}
+
 func resourceDcsInstancesV1Create(d *schema.ResourceData, meta interface{}) error {
 	config := meta.(*Config)
 	dcsV1Client, err := config.dcsV1Client(GetRegion(d, config))
@@ -200,22 +269,42 @@ func resourceDcsInstancesV1Create(d *schema.ResourceData, meta interface{}) erro
 		no_password_access = "false"
 	}
 	createOpts := &instances.CreateOps{
-		Name:                 d.Get("name").(string),
-		Description:          d.Get("description").(string),
-		Engine:               d.Get("engine").(string),
-		EngineVersion:        d.Get("engine_version").(string),
-		Capacity:             d.Get("capacity").(int),
-		NoPasswordAccess:     no_password_access,
-		Password:             d.Get("password").(string),
-		AccessUser:           d.Get("access_user").(string),
-		VPCID:                d.Get("vpc_id").(string),
-		SecurityGroupID:      d.Get("security_group_id").(string),
-		SubnetID:             d.Get("subnet_id").(string),
-		AvailableZones:       getAllAvailableZones(d),
+		Name:             d.Get("name").(string),
+		Description:      d.Get("description").(string),
+		Engine:           d.Get("engine").(string),
+		EngineVersion:    d.Get("engine_version").(string),
+		Capacity:         d.Get("capacity").(int),
+		NoPasswordAccess: no_password_access,
+		Password:         d.Get("password").(string),
+		AccessUser:       d.Get("access_user").(string),
+		VPCID:            d.Get("vpc_id").(string),
+		SecurityGroupID:  d.Get("security_group_id").(string),
+		SubnetID:         d.Get("subnet_id").(string),
+		//AvailableZones:       getAllAvailableZones(d),
 		ProductID:            d.Get("product_id").(string),
 		InstanceBackupPolicy: getInstanceBackupPolicy(d),
 		MaintainBegin:        d.Get("maintain_begin").(string),
 		MaintainEnd:          d.Get("maintain_end").(string),
+	}
+
+	createOpts.AvailableZones, err = getDcsAZIds(dcsV1Client, d.Get("available_zones").([]interface{}), GetRegion(d, config))
+	if err != nil {
+		return fmt.Errorf("Error get az id for dcs instance client: %s", err)
+	}
+
+	product_id, product_ok := d.GetOk("product_id")
+	instance_type, type_ok := d.GetOk("instance_type")
+	if !product_ok && !type_ok {
+		return fmt.Errorf("one of product_id or instance_type must be configured")
+	}
+	if product_ok {
+		createOpts.ProductID = product_id.(string)
+	} else {
+		// Get Product ID
+		createOpts.ProductID, err = getDcsProductId(dcsV1Client, instance_type.(string))
+		if err != nil {
+			return fmt.Errorf("Error get product id for dcs instance client: %s", err)
+		}
 	}
 
 	log.Printf("[DEBUG] Create Options: %#v", createOpts)
