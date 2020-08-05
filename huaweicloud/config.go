@@ -454,6 +454,13 @@ func (c *Config) dnsV2Client(region string) (*golangsdk.ServiceClient, error) {
 	})
 }
 
+func (c *Config) dehV1Client(region string) (*golangsdk.ServiceClient, error) {
+	return huaweisdk.NewDeHServiceV1(c.HwClient, golangsdk.EndpointOpts{
+		Region:       region,
+		Availability: c.getHwEndpointType(),
+	})
+}
+
 func (c *Config) identityV3Client(region string) (*golangsdk.ServiceClient, error) {
 	return huaweisdk.NewIdentityV3(c.DomainClient, golangsdk.EndpointOpts{
 		//Region:       c.determineRegion(region),
