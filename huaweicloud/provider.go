@@ -215,6 +215,7 @@ func Provider() terraform.ResourceProvider {
 		},
 
 		ResourcesMap: map[string]*schema.Resource{
+			"huaweicloud_antiddos":                           resourceAntiDdosV1(),
 			"huaweicloud_api_gateway_group":                  resourceAPIGatewayGroup(),
 			"huaweicloud_api_gateway_api":                    resourceAPIGatewayAPI(),
 			"huaweicloud_blockstorage_volume_v2":             resourceBlockStorageVolumeV2(),
